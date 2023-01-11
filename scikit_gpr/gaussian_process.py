@@ -32,6 +32,10 @@ class GaussianProcessRegressorWithTorch(GaussianProcessRegressor):
 
     Parameters
     ----------
+    kernel : Kernel, default=None
+        GPyTorch kernel composition specifying the covariance function of the GP.
+        See https://docs.gpytorch.ai/en/stable/kernels.html.
+        If None it will use a default ScaleKernel * RBFKernel
     n_iter : int, default=1
         The number of iteration during the Adam optimization.
     normalize_y : bool, default=False
@@ -42,6 +46,17 @@ class GaussianProcessRegressorWithTorch(GaussianProcessRegressor):
         are reported.
     verbose : bool, default=True
         Whether or not to print optimization messages
+    noise_level: float, default=None,
+        A priori WhiteNoise level
+    noise_level_bounds: tuple of floats, default=None
+        Bounds for the WhiteNoise
+    optimizer : str, default="Adam"
+        Must be one of the PyTorch supported optimizers for optimizing the kernel’s parameters,
+        specified by a string. See https://pytorch.org/docs/stable/optim.html
+        Available internal optimizers are: `{'Adam', 'SGD'}`
+    learning_rate : float
+        The learning rate used. It controls the step-size in updating the weights.
+
 
     Attributes
     ----------
@@ -66,10 +81,12 @@ class GaussianProcessRegressorWithTorch(GaussianProcessRegressor):
         Names of features seen during :term:`fit`. Defined only when `X`
         has feature names that are all strings.
         .. versionadded:: 1.0
+
     See Also
     --------
     GaussianProcessClassifier : Gaussian process classification (GPC)
         based on Laplace approximation.
+
     References
     ----------
     .. [RW2006] `Carl E. Rasmussen and Christopher K.I. Williams,
@@ -98,9 +115,10 @@ class GaussianProcessRegressorWithTorch(GaussianProcessRegressor):
                  verbose=True,
                  noise_level=None,
                  noise_level_bounds=None,
+                 optimizer="Adam",
+                 learning_rate=0.1,
                  ):
 
-        noise_prior = None
         noise_constraint = None
         if noise_level and not noise_level_bounds:
             noise_constraint = gpytorch.constraints.Positive(initial_value=noise_level)
@@ -115,6 +133,8 @@ class GaussianProcessRegressorWithTorch(GaussianProcessRegressor):
         self.verbose = verbose
         self.cached = False
         self.kernel = kernel
+        self.optimizer = optimizer
+        self.learning_rate = learning_rate
 
 
     def fit(self, train_x, train_y):
@@ -127,7 +147,7 @@ class GaussianProcessRegressorWithTorch(GaussianProcessRegressor):
             self._y_train_std = 1
 
         if self.kernel is None:  # Use an RBF kernel as default
-            self.kernel_ = kernels.ScaleKernel(kernels.RBFKernel())
+            self.kernel_ = gpytorch.kernels.ScaleKernel(gpytorch.kernels.kernels.RBFKernel())
         else:
             self.kernel_ = copy.deepcopy(self.kernel)
 
@@ -140,14 +160,15 @@ class GaussianProcessRegressorWithTorch(GaussianProcessRegressor):
         self.model.train()
         self.likelihood.train()
 
-        # Use the adam optimizer
-        optimizer = torch.optim.Adam(self.model.parameters(),
-                                      lr=0.1)  # Includes GaussianLikelihood parameters
+        if self.optimizer == "Adam":
+            optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate)
+        elif self.optimizer == "SGD":
+            optimizer = torch.optim.SGD(self.model.parameters(), lr=self.learning_rate)
 
         # "Loss" for GPs - the marginal log likelihood
         mll = gpytorch.mlls.ExactMarginalLogLikelihood(self.likelihood,
                                                        self.model)
-
+        # optimizer.step()
         for i in range(self.n_iter):
             # Zero gradients from previous iteration
             optimizer.zero_grad()
@@ -156,10 +177,13 @@ class GaussianProcessRegressorWithTorch(GaussianProcessRegressor):
             # Calc loss and backprop gradients
             loss = -mll(output, train_y)
             loss.backward()
+            optimizer.step()
+
             if self.verbose:
                 print(f'Iter {i + 1:d}/{self.n_iter:d} - Loss: {loss.item():.3f}   '
                       f'noise: {self.model.likelihood.noise.item():.3f}')
-            optimizer.step()
+
+
 
         self.log_marginal_likelihood_value_ = -loss.detach().numpy()
         return self
