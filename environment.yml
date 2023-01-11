@@ -1,0 +1,9 @@
+channels:
+    - conda-forge
+    - pytorch
+dependencies:
+    - numpy
+    - scikit-learn
+    - PyTorch
+    - GPyTorch
+
