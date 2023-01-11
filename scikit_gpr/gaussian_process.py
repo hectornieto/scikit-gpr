@@ -5,13 +5,15 @@ from sklearn.utils._param_validation import Interval
 from sklearn.gaussian_process import GaussianProcessRegressor
 from numbers import Integral
 import gpytorch, torch
-
-
+import copy
 class MyGP(gpytorch.models.ExactGP):
-    def __init__(self, train_x, train_y, likelihood):
+    def __init__(self, train_x, train_y, likelihood, kernel=None):
         super(MyGP, self).__init__(train_x, train_y, likelihood)
         self.mean_module = gpytorch.means.ConstantMean()
-        self.covar_module = gpytorch.kernels.ScaleKernel(gpytorch.kernels.RBFKernel(ard_num_dims=train_x.shape[-1]))
+        if kernel:
+            self.covar_module = kernel
+        else:
+            self.covar_module = gpytorch.kernels.ScaleKernel(gpytorch.kernels.RBFKernel(ard_num_dims=train_x.shape[-1]))
 
     def forward(self, x):
         mean = self.mean_module(x)
@@ -86,18 +88,33 @@ class GaussianProcessRegressorWithTorch(GaussianProcessRegressor):
 
     _parameter_constraints: dict = {"n_iter": [Interval(Integral, 1, None, closed="left")],
                                     "normalize_y": ["boolean"],
+                                    "verbose": ["boolean"]
     }
 
     def __init__(self,
+                 kernel=None,
                  n_iter=1,
                  normalize_y=False,
                  verbose=True,
+                 noise_level=None,
+                 noise_level_bounds=None,
                  ):
-        self.likelihood = gpytorch.likelihoods.GaussianLikelihood()
+
+        noise_prior = None
+        noise_constraint = None
+        if noise_level and not noise_level_bounds:
+            noise_constraint = gpytorch.constraints.Positive(initial_value=noise_level)
+        elif noise_level and noise_level_bounds:
+            noise_constraint = gpytorch.constraints.Interval(*noise_level_bounds, initial_value=noise_level)
+        elif noise_level_bounds:
+            noise_constraint = gpytorch.constraints.Interval(*noise_level_bounds)
+
+        self.likelihood = gpytorch.likelihoods.GaussianLikelihood(noise_constraint=noise_constraint)
         self.n_iter = n_iter
         self.normalize_y = normalize_y
         self.verbose = verbose
         self.cached = False
+        self.kernel = kernel
 
 
     def fit(self, train_x, train_y):
@@ -109,10 +126,15 @@ class GaussianProcessRegressorWithTorch(GaussianProcessRegressor):
             self._y_train_mean = 0
             self._y_train_std = 1
 
+        if self.kernel is None:  # Use an RBF kernel as default
+            self.kernel_ = kernels.ScaleKernel(kernels.RBFKernel())
+        else:
+            self.kernel_ = copy.deepcopy(self.kernel)
 
         train_x = torch.tensor(train_x, dtype=torch.float)
         train_y = torch.tensor(train_y, dtype=torch.float)
-        self.model = MyGP(train_x, train_y, self.likelihood)
+
+        self.model = MyGP(train_x, train_y, self.likelihood, kernel=self.kernel_)
 
         # Find optimal model hyperparameters
         self.model.train()
@@ -139,6 +161,7 @@ class GaussianProcessRegressorWithTorch(GaussianProcessRegressor):
                       f'noise: {self.model.likelihood.noise.item():.3f}')
             optimizer.step()
 
+        self.log_marginal_likelihood_value_ = -loss.detach().numpy()
         return self
 
 
@@ -160,10 +183,14 @@ class GaussianProcessRegressorWithTorch(GaussianProcessRegressor):
         if return_std:
             y_var = results.variance.numpy()
             y_var = np.outer(y_var, self._y_train_std ** 2).reshape(*y_var.shape, -1)
+            if y_var.shape[1] == 1:
+                y_var = np.squeeze(y_var, axis=1)
             return pred, np.sqrt(y_var)
         elif return_cov:
             y_cov = results.covariance_matrix.numpy()
             y_cov = np.outer(y_cov, self._y_train_std ** 2).reshape(*y_cov.shape, -1)
+            if y_cov.shape[1] == 1:
+                y_cov = np.squeeze(y_cov, axis=1)
             return pred, y_cov
         else:
             return pred
